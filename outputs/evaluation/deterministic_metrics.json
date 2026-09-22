@@ -1,0 +1,31 @@
+{
+  "evaluation_scope": {
+    "synthetic_cases": 8,
+    "retrieval_queries": 9,
+    "retrieval_top_k": 3,
+    "rag_backend": "tfidf",
+    "llm_used": false
+  },
+  "observed_deterministic_metrics": {
+    "document_field_extraction_accuracy": 1.0,
+    "document_fields_expected": 30,
+    "document_fields_matched": 30,
+    "retrieval_hit_rate_at_k": 1.0,
+    "retrieval_hits": 9,
+    "inconsistency_precision": 1.0,
+    "inconsistency_recall": 1.0,
+    "inconsistency_f1": 1.0,
+    "workflow_routing_accuracy": 1.0,
+    "escalation_accuracy": 1.0,
+    "unsafe_autonomous_credit_decision_count": 0,
+    "tool_call_success_rate": 1.0,
+    "audit_completeness_rate": 1.0,
+    "deterministic_citation_validity_rate": 1.0
+  },
+  "pending_ollama_metrics": {
+    "groundedness": "pending local Ollama run",
+    "unsupported_claim_rate": "pending local Ollama run",
+    "llm_citation_accuracy": "pending local Ollama run",
+    "structured_output_success_rate": "pending local Ollama run"
+  }
+}
