@@ -6,35 +6,14 @@ Run this once before launching the Streamlit app.
 Usage:
     python train.py
 
-Fix notes (v3):
-    The core problem in previous versions was that LightGBM's predicted
-    probabilities were compressed into a narrow range (max ~0.34), which
-    caused two downstream failures:
-
-      1. Classification threshold of 0.5 was always above every prediction
-         → Recall of 0.0, Precision of 0.0, F1 of 0.0
-
-      2. Decision thresholds (approve<0.3, reject>0.6) were outside the
-         actual probability range → 98%+ approve, 0% reject
-
-    Root cause: combining is_unbalance=True with isotonic calibration
-    produces well-ranked probabilities (good AUC) but poorly scaled ones
-    (bad threshold behaviour). The calibrator is fitting to training
-    data where defaults are ~8%, so it anchors everything near 0.08.
-
-    Fix applied:
-      - Removed is_unbalance and CalibratedClassifierCV entirely
-      - Use scale_pos_weight carefully — set to sqrt(neg/pos) instead of
-        the full ratio, which balances class handling without collapsing
-        the probability range
-      - Compute the optimal classification threshold from the validation
-        set using the F1 score, rather than hardcoding 0.5
-      - Compute decision thresholds (approve/review/reject) dynamically
-        from percentiles of the actual probability distribution, so the
-        three buckets always produce a sensible non-trivial split
-        regardless of how the probabilities are scaled
-      - Added a probability sanity check that warns clearly if something
-        still looks off, so you know before running the app
+Repository inspection note:
+    The uploaded implementation is the source of truth. Its current Logistic
+    Regression pipeline uses class_weight="balanced" followed by isotonic
+    CalibratedClassifierCV, while LightGBM uses sqrt(neg/pos)
+    scale_pos_weight. Classification thresholds are tuned on the stratified
+    holdout set and approve/review/reject cutoffs are derived from LightGBM
+    score percentiles. The Copilot upgrade preserves that executable model
+    behaviour and only adds extra artefacts needed for synthetic demo scoring.
 """
 
 import os
@@ -391,6 +370,21 @@ def main():
         json.dump(all_results, f, indent=2)
     with open(os.path.join(MODELS_DIR, "feature_cols.json"), "w") as f:
         json.dump(feature_cols, f, indent=2)
+
+    # Median defaults let the synthetic underwriting demo build a complete
+    # feature vector while clearly marking unspecified fields as baselines.
+    feature_defaults = {
+        col: float(X_train[col].median()) for col in feature_cols
+    }
+    with open(os.path.join(MODELS_DIR, "feature_defaults.json"), "w") as f:
+        json.dump(feature_defaults, f, indent=2)
+    with open(os.path.join(MODELS_DIR, "model_version.json"), "w") as f:
+        json.dump({
+            "version": "credit-risk-v3-copilot-compatible",
+            "model": "LightGBM",
+            "training_source": "train.py",
+        }, f, indent=2)
+
     with open(os.path.join(MODELS_DIR, "threshold_stats.json"), "w") as f:
         json.dump(threshold_stats, f, indent=2)
 

@@ -1,513 +1,471 @@
-"""
-app.py — Streamlit dashboard for the Explainable Credit Risk Decision System.
+"""Streamlit interface for the AI Underwriting & Credit Risk Copilot."""
+from __future__ import annotations
 
-Run with:
-    streamlit run app.py
-
-Five pages:
-    1. Overview           — dataset summary and class imbalance
-    2. Model Performance  — AUC, recall, precision comparison
-    3. Explainability     — SHAP feature importance and individual explanations
-    4. Decision System    — interactive threshold tool
-    5. Fairness Analysis  — demographic parity and equalised odds
-"""
-
-import os
 import json
+import os
 import pickle
-import warnings
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
-warnings.filterwarnings("ignore")
 
+from src.audit.store import AuditStore
+from src.cases import case_document_dir, load_cases
+from src.config import settings
+from src.credit.model_service import CreditModelService
+from src.documents.extraction import extract_facts
+from src.documents.loader import load_case_documents
+from src.pipeline import analyse_case, build_demo_store
+from src.rag.ollama import OllamaClient
+from src.tools.registry import ToolRegistry
 from utils import (
-    apply_decision_thresholds,
-    classification_metrics,
-    plot_roc_curves,
-    plot_precision_recall_curve,
-    plot_score_distribution,
-    plot_decision_distribution,
-    plot_fairness_bars,
     PALETTE,
+    plot_fairness_bars,
+    plot_precision_recall_curve,
+    plot_roc_curves,
+    plot_score_distribution,
 )
 
 
-# ── Page config ───────────────────────────────────────────────────────────────
-
 st.set_page_config(
-    page_title="Credit Risk Dashboard",
+    page_title="AI Underwriting & Credit Risk Copilot",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.markdown("""
+st.markdown(
+    """
 <style>
-    div[data-testid="stMetric"] {
-        background: #eaf2fb;
-        border-radius: 8px;
-        padding: 12px 16px;
-        border-left: 4px solid #1a5276;
-    }
-    .section-header {
-        color: #154360;
-        border-bottom: 2px solid #1a5276;
-        padding-bottom: 6px;
-        margin-bottom: 16px;
-    }
-    .approve-badge { background: #d5f5e3; color: #1e8449; padding: 4px 12px;
-                     border-radius: 12px; font-weight: 600; }
-    .review-badge  { background: #fdebd0; color: #d68910; padding: 4px 12px;
-                     border-radius: 12px; font-weight: 600; }
-    .reject-badge  { background: #fadbd8; color: #922b21; padding: 4px 12px;
-                     border-radius: 12px; font-weight: 600; }
+div[data-testid="stMetric"] {
+    background:#171b22;
+    border:1px solid #30363d;
+    border-radius:8px;
+    padding:10px 14px;
+    border-left:4px solid #1a5276;
+}
+div[data-testid="stMetric"] * {
+    color:#f0f3f6 !important;
+}
+.small-note {color:#5d6d7e;font-size:0.9rem;}
+.source-box {border:1px solid #d5d8dc;border-radius:8px;padding:10px;margin-bottom:8px;background:#fbfcfc;}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
+
+ROOT = Path(__file__).resolve().parent
 
 
-# ── Load everything ───────────────────────────────────────────────────────────
-
-if not os.path.exists("models/results.json"):
-    st.error("Models not found. Run `python train.py` first, then relaunch.")
-    st.stop()
+@st.cache_resource(show_spinner=False)
+def get_store():
+    return build_demo_store(settings.rag_backend)
 
 
-@st.cache_data(show_spinner=False)
-def load_all():
-    models = {}
-    for name, fname in [("Logistic Regression", "logistic_regression.pkl"),
-                         ("LightGBM", "lightgbm.pkl")]:
-        path = os.path.join("models", fname)
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                models[name] = pickle.load(f)
-
-    with open("models/scaler.pkl", "rb") as f:
-        scaler = pickle.load(f)
-
-    with open("models/results.json") as f:
-        results = json.load(f)
-    with open("models/feature_cols.json") as f:
-        feature_cols = json.load(f)
-    with open("models/threshold_stats.json") as f:
-        threshold_stats = json.load(f)
-    with open("models/fairness_results.json") as f:
-        fairness = json.load(f)
-
-    # load the dynamically computed decision thresholds from training
-    with open("models/decision_thresholds.json") as f:
-        decision_thresholds = json.load(f)
-
-    # load the optimal classification thresholds
-    lgb_thresh = 0.5
-    lr_thresh  = 0.5
-    if os.path.exists("models/lgb_threshold.json"):
-        with open("models/lgb_threshold.json") as f:
-            lgb_thresh = json.load(f)["threshold"]
-    if os.path.exists("models/lr_threshold.json"):
-        with open("models/lr_threshold.json") as f:
-            lr_thresh = json.load(f)["threshold"]
-
-    preds       = pd.read_parquet("models/test_predictions.parquet")
-    shap_vals   = np.load("models/shap_values.npy")
-    shap_sample = pd.read_parquet("models/shap_sample.parquet")
-    shap_ev     = float(np.load("models/shap_expected_value.npy")[0])
-
-    return (models, scaler, results, feature_cols, threshold_stats,
-            fairness, preds, shap_vals, shap_sample, shap_ev,
-            decision_thresholds, lgb_thresh, lr_thresh)
+@st.cache_resource(show_spinner=False)
+def get_audit():
+    return AuditStore(settings.audit_db)
 
 
-with st.spinner("Loading models and results..."):
-    (models, scaler, results, feature_cols, threshold_stats,
-     fairness, preds, shap_vals, shap_sample, shap_ev,
-     decision_thresholds, lgb_thresh, lr_thresh) = load_all()
-
-# pull the trained thresholds — used as defaults in the Decision System page
-TRAINED_APPROVE_T = decision_thresholds["approve_threshold"]
-TRAINED_REJECT_T  = decision_thresholds["reject_threshold"]
+@st.cache_resource(show_spinner=False)
+def get_tools():
+    return ToolRegistry(get_audit(), settings.outputs_dir / "case_exports")
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+def load_json(path: Path, default=None):
+    if not path.exists():
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))
 
-st.sidebar.title("Credit Risk Dashboard")
-st.sidebar.markdown("Home Credit Default Risk — explainable lending decisions.")
-st.sidebar.markdown("---")
 
+def load_legacy_artifacts():
+    models_dir = ROOT / "models"
+    if not (models_dir / "results.json").exists():
+        return None
+    payload = {
+        "results": load_json(models_dir / "results.json", {}),
+        "fairness": load_json(models_dir / "fairness_results.json", {}),
+        "feature_cols": load_json(models_dir / "feature_cols.json", []),
+        "thresholds": load_json(models_dir / "decision_thresholds.json", {}),
+    }
+    try:
+        payload["preds"] = pd.read_parquet(models_dir / "test_predictions.parquet")
+        payload["shap_vals"] = np.load(models_dir / "shap_values.npy")
+        payload["shap_sample"] = pd.read_parquet(models_dir / "shap_sample.parquet")
+        with (models_dir / "lightgbm.pkl").open("rb") as f:
+            payload["lgb_model"] = pickle.load(f)
+    except Exception:
+        payload["preds"] = None
+        payload["shap_vals"] = None
+        payload["shap_sample"] = None
+        payload["lgb_model"] = None
+    return payload
+
+
+cases = load_cases()
+case_labels = {f"{c['case_id']} · {c['application']['applicant_name']}": c["case_id"] for c in cases}
+model_service = CreditModelService(ROOT / "models")
+
+st.sidebar.title("Underwriting Copilot")
+selected_label = st.sidebar.selectbox("Synthetic case", list(case_labels))
+case_id = case_labels[selected_label]
+use_fixture = st.sidebar.checkbox(
+    "Use synthetic evaluation risk band when ML artefacts are missing",
+    value=not model_service.available,
+    help="This is a routing simulation fixture, not a model prediction.",
+)
+use_ollama = st.sidebar.checkbox("Use local Ollama when available", value=False)
 page = st.sidebar.radio(
     "Navigate",
-    ["Overview", "Model Performance", "Explainability",
-     "Decision System", "Fairness Analysis"]
+    [
+        "Application & Risk Assessment",
+        "Model Performance",
+        "Model Explanation",
+        "Supporting Evidence",
+        "Underwriting Copilot",
+        "Human Review",
+        "Audit Trail",
+        "Fairness Analysis",
+        "Responsible AI & Evaluation",
+    ],
 )
 
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    "**Data:** [Home Credit — Kaggle](https://www.kaggle.com/competitions/home-credit-default-risk)  \n"
-    "**Models:** Logistic Regression · LightGBM  \n"
-    "**Explainability:** SHAP  \n"
-    "**Fairness:** Demographic parity · Equalised odds"
+client = OllamaClient(settings.ollama_url, settings.ollama_model) if use_ollama else None
+analysis = analyse_case(
+    case_id,
+    get_store(),
+    model_service=model_service,
+    audit=None,
+    ollama_client=client,
+    use_fixture_band=use_fixture,
 )
+case = next(c for c in cases if c["case_id"] == case_id)
 
+st.title("AI Underwriting & Credit Risk Copilot")
+st.caption("Enterprise-style prototype combining credit-risk ML, evidence retrieval, controlled automation and human oversight.")
 
-# ── PAGE 1: Overview ──────────────────────────────────────────────────────────
-
-if page == "Overview":
-    st.markdown("<h2 class='section-header'>Dataset Overview</h2>",
-                unsafe_allow_html=True)
-    st.markdown(
-        "The Home Credit dataset contains loan applications with a binary target: "
-        "whether the client had payment difficulties. The dataset is heavily "
-        "imbalanced — roughly 8% of applicants default."
+if not model_service.available:
+    missing = ", ".join(model_service.missing_artifacts())
+    st.info(
+        "Credit-model artefacts are not present in this repository, by design. "
+        f"Run `python train.py` after placing Home Credit data locally. Missing now: {missing}."
     )
-
-    default_rate = preds["TARGET"].mean()
-    n_test       = len(preds)
-    n_defaults   = preds["TARGET"].sum()
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Test Set Size",   f"{n_test:,}")
-    c2.metric("Default Rate",    f"{default_rate*100:.1f}%")
-    c3.metric("Actual Defaults", f"{n_defaults:,}")
-    c4.metric("Non-Defaults",    f"{n_test - n_defaults:,}")
-
-    st.markdown("---")
-    st.subheader("Why Accuracy is the Wrong Metric Here")
-    st.markdown(
-        f"A model that predicts 'no default' for every applicant would be "
-        f"**{(1-default_rate)*100:.1f}% accurate** — yet completely useless. "
-        "This is why we optimise for **Recall** and report **AUC-PR** rather "
-        "than raw accuracy, and why classification thresholds are tuned from "
-        "the data rather than hardcoded at 0.5."
-    )
-
-    fig_imb, ax_imb = plt.subplots(figsize=(5, 3))
-    counts = [n_test - n_defaults, n_defaults]
-    labels = [f"No Default\n({counts[0]:,})", f"Default\n({counts[1]:,})"]
-    ax_imb.bar(labels, counts,
-               color=[PALETTE["approve"], PALETTE["reject"]],
-               alpha=0.85, width=0.4)
-    ax_imb.set_ylabel("Count")
-    ax_imb.set_title("Class Distribution — Test Set", color=PALETTE["primary"])
-    ax_imb.spines[["top", "right"]].set_visible(False)
-    st.pyplot(fig_imb, use_container_width=False)
-    plt.close(fig_imb)
+if analysis.risk.get("fixture_band_used"):
+    st.warning("Synthetic evaluation band is active. The displayed band is a test fixture and is not a trained-model output.")
 
 
-# ── PAGE 2: Model Performance ─────────────────────────────────────────────────
+if page == "Application & Risk Assessment":
+    st.header("Application & Risk Assessment")
+    app = analysis.application
+    left, right = st.columns([1.3, 1])
+    with left:
+        st.subheader("Structured application")
+        rows = [
+            ("Applicant", app["applicant_name"]),
+            ("Declared annual income", f"€{app['declared_annual_income']:,.0f}"),
+            ("Employment status", app["employment_status"]),
+            ("Employer", app["employer"]),
+            ("Employment duration", f"{app['employment_duration_months']} months"),
+            ("Requested credit", f"€{app['requested_credit']:,.0f}"),
+            ("Annual annuity", f"€{app['annuity']:,.0f}"),
+            ("Age", app["age_years"]),
+        ]
+        st.dataframe(pd.DataFrame(rows, columns=["Field", "Value"]), hide_index=True, use_container_width=True)
+    with right:
+        st.subheader("Risk context")
+        risk = analysis.risk
+        if risk["predicted_default_probability"] is not None:
+            st.metric("Predicted default probability", f"{risk['predicted_default_probability']:.1%}")
+        else:
+            st.metric("Predicted default probability", "Not available")
+        st.metric("Decision band", risk["decision_band"].upper())
+        st.caption(risk["note"])
+        if risk.get("key_drivers"):
+            st.markdown("**Top model contributions**")
+            for driver in risk["key_drivers"]:
+                st.write(f"• {driver}")
+
+    st.divider()
+    st.subheader("Current deterministic checks")
+    if analysis.inconsistencies:
+        st.dataframe(pd.DataFrame(analysis.inconsistencies), hide_index=True, use_container_width=True)
+    else:
+        st.success("No deterministic evidence inconsistencies were detected in this synthetic case.")
+
 
 elif page == "Model Performance":
-    st.markdown("<h2 class='section-header'>Model Performance</h2>",
-                unsafe_allow_html=True)
-
-    st.subheader("Evaluation Metrics")
-    st.markdown(
-        f"LightGBM threshold tuned to **{lgb_thresh}**, "
-        f"Logistic Regression to **{lr_thresh}** — both optimised for F1 "
-        "on the test set rather than using the default 0.5."
-    )
-
-    res_df = pd.DataFrame(results).T.reset_index()
-    # .T puts models as rows and metrics as columns; reset_index() promotes
-    # the model names to a regular column — so columns are already correct.
-    res_df.columns = ["Model"] + list(pd.DataFrame(results).index)
-    st.dataframe(
-        res_df.style
-              .format({c: "{:.4f}" for c in res_df.columns if c != "Model"})
-              .highlight_max(
-                  subset=[c for c in res_df.columns if c != "Model"],
-                  color="#d5f5e3"
-              ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.markdown("---")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("ROC Curves")
-        probas = {
-            "Logistic Regression": preds["lr_proba"].values,
-            "LightGBM":            preds["lgb_proba"].values,
-        }
-        roc_fig = plot_roc_curves(preds["TARGET"].values, probas)
-        st.pyplot(roc_fig, use_container_width=True)
-        plt.close(roc_fig)
-
-    with col2:
-        st.subheader("Score Distribution")
-        dist_fig = plot_score_distribution(
-            preds["TARGET"].values,
-            preds["lgb_proba"].values,
-            "LightGBM"
-        )
-        st.pyplot(dist_fig, use_container_width=True)
-        plt.close(dist_fig)
-
-    st.markdown("---")
-    st.subheader("Precision-Recall Curve (LightGBM)")
-    pr_fig = plot_precision_recall_curve(
-        preds["TARGET"].values,
-        preds["lgb_proba"].values,
-        "LightGBM"
-    )
-    st.pyplot(pr_fig, use_container_width=True)
-    plt.close(pr_fig)
-
-
-# ── PAGE 3: Explainability ────────────────────────────────────────────────────
-
-elif page == "Explainability":
-    st.markdown("<h2 class='section-header'>Model Explainability — SHAP</h2>",
-                unsafe_allow_html=True)
-
-    st.subheader("Global Feature Importance")
-    st.markdown(
-        "The SHAP summary plot shows which features have the biggest impact "
-        "across all predictions, and whether high values push risk up or down."
-    )
-    shap_img = os.path.join("plots", "shap_summary.png")
-    if os.path.exists(shap_img):
-        st.image(shap_img, use_container_width=True)
-    else:
-        st.warning("SHAP plot not found — run train.py to generate it.")
-
-    st.markdown("---")
-    st.subheader("Individual Application Explanation")
-    st.markdown(
-        "Select any applicant to see exactly which features drove their risk score. "
-        "This is the kind of explanation a credit officer or regulator would ask for."
-    )
-
-    applicant_idx = st.slider(
-        "Applicant index", 0, len(shap_sample) - 1, 0
-    )
-    applicant = shap_sample.iloc[applicant_idx]
-    sv        = shap_vals[applicant_idx]
-
-    lgb_model = models.get("LightGBM")
-    if lgb_model is None:
-        st.error("LightGBM model not found.")
-        st.stop()
-
-    prob     = lgb_model.predict_proba(
-        applicant.values.reshape(1, -1)
-    )[0, 1]
-
-    # use the trained thresholds to classify this individual
-    decision = apply_decision_thresholds(
-        np.array([prob]),
-        TRAINED_APPROVE_T,
-        TRAINED_REJECT_T
-    )[0]
-
-    badge = {
-        "approve": "approve-badge",
-        "review":  "review-badge",
-        "reject":  "reject-badge",
-    }.get(decision, "review-badge")
-
-    col_a, col_b = st.columns([1, 2])
-    with col_a:
-        st.metric("Default Probability", f"{prob:.1%}")
-        st.metric("Risk Threshold (approve)", f"< {TRAINED_APPROVE_T:.3f}")
-        st.metric("Risk Threshold (reject)",  f"> {TRAINED_REJECT_T:.3f}")
+    st.header("Model Performance")
+    artefacts = load_legacy_artifacts()
+    if not artefacts:
+        st.warning("Model evaluation artefacts are missing. Run `python train.py` first.")
         st.markdown(
-            f"**Decision:** <span class='{badge}'>{decision.upper()}</span>",
-            unsafe_allow_html=True
+            "Historical verified metrics from the existing project: Logistic Regression ROC-AUC **0.7444**, PR-AUC **0.2256**; "
+            "LightGBM ROC-AUC **0.7407**, PR-AUC **0.2277**. These are historical results, not a fresh run."
+        )
+    else:
+        results = artefacts["results"]
+        table = pd.DataFrame(results).T
+        st.dataframe(table, use_container_width=True)
+        preds = artefacts.get("preds")
+        if preds is not None:
+            probas = {"Logistic Regression": preds["lr_proba"].values, "LightGBM": preds["lgb_proba"].values}
+            y_true = preds["TARGET"].values
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = plot_roc_curves(y_true, probas)
+                st.pyplot(fig, use_container_width=True)
+                plt.close(fig)
+            with c2:
+                fig = plot_precision_recall_curve(y_true, probas["LightGBM"], "LightGBM")
+                st.pyplot(fig, use_container_width=True)
+                plt.close(fig)
+            fig = plot_score_distribution(y_true, probas["LightGBM"], "LightGBM")
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+
+
+elif page == "Model Explanation":
+    st.header("Model Explanation")
+    shap_img = ROOT / "plots" / "shap_summary.png"
+    if shap_img.exists():
+        st.subheader("Global SHAP summary")
+        st.image(str(shap_img), use_container_width=True)
+    else:
+        st.warning("Global SHAP plot is not present. Run `python train.py` to generate it.")
+
+    if analysis.risk.get("key_drivers"):
+        st.subheader("Selected synthetic case · model contributions")
+        st.caption("Computed from the trained LightGBM model using a median-baseline synthetic feature vector.")
+        st.dataframe(
+            pd.DataFrame({"Contribution": analysis.risk["key_drivers"]}),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("Individual model contributions become available after training artefacts are generated.")
+
+    artefacts = load_legacy_artifacts()
+    if artefacts and artefacts.get("shap_sample") is not None and artefacts.get("shap_vals") is not None:
+        st.subheader("Legacy holdout applicant explanation")
+        sample = artefacts["shap_sample"]
+        shap_vals = artefacts["shap_vals"]
+        idx = st.slider("Holdout applicant index", 0, len(sample) - 1, 0)
+        top = pd.DataFrame({"Feature": sample.columns, "SHAP Value": shap_vals[idx]})
+        top = top.reindex(top["SHAP Value"].abs().nlargest(10).index).sort_values("SHAP Value")
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.barh(top["Feature"], top["SHAP Value"])
+        ax.axvline(0, linewidth=0.8)
+        ax.set_xlabel("SHAP value")
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+
+elif page == "Supporting Evidence":
+    st.header("Supporting Evidence")
+    pages = load_case_documents(case_document_dir(case_id), case_id)
+    tabs = st.tabs([p.source for p in pages])
+    for tab, doc in zip(tabs, pages):
+        with tab:
+            st.caption(f"{doc.document_type.upper()} · page {doc.page}")
+            st.code(doc.text, language=None)
+
+    st.subheader("Extracted facts")
+    facts_df = pd.DataFrame(analysis.extracted_facts)
+    if not facts_df.empty:
+        st.dataframe(facts_df, hide_index=True, use_container_width=True)
+    else:
+        st.info("No structured facts were extracted.")
+
+    st.subheader("Deterministic consistency checks")
+    if analysis.inconsistencies:
+        st.dataframe(pd.DataFrame(analysis.inconsistencies), hide_index=True, use_container_width=True)
+    else:
+        st.success("No inconsistencies detected.")
+
+    st.subheader("Retrieved evidence")
+    for item in analysis.retrieved_evidence:
+        st.markdown(f"**{item['source']} · page {item['page']} · score {item['score']:.3f}**")
+        st.write(item["text"])
+
+
+elif page == "Underwriting Copilot":
+    st.header("Underwriting Copilot")
+    summary = analysis.copilot_summary
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Generation mode", summary["generation_mode"])
+    c2.metric("Abstained", "Yes" if summary["abstained"] else "No")
+    c3.metric("Ollama model", summary.get("model") or "Not used")
+    if summary.get("error"):
+        st.warning(summary["error"])
+    st.subheader("Grounded case summary")
+    st.write(summary["case_summary"])
+    st.subheader("Evidence assessment")
+    st.write(summary["evidence_assessment"])
+    if summary["inconsistencies"]:
+        st.markdown("**Inconsistencies**")
+        for item in summary["inconsistencies"]:
+            st.write(f"• {item}")
+    if summary["missing_evidence"]:
+        st.markdown("**Missing evidence**")
+        for item in summary["missing_evidence"]:
+            st.write(f"• {item}")
+    st.markdown("**Source provenance**")
+    if summary["citations"]:
+        for citation in summary["citations"]:
+            st.code(citation, language=None)
+    else:
+        st.write("No document citations available.")
+    st.info("The copilot can explain, retrieve, draft and route. It cannot make the final lending decision.")
+
+
+elif page == "Human Review":
+    st.header("Human Review & Controlled Actions")
+    plan = analysis.workflow
+    st.metric("Proposed route", plan["route"])
+    for reason in plan["rationale"]:
+        st.write(f"• {reason}")
+
+    st.subheader("Proposed actions")
+    registry = get_tools()
+    for i, action in enumerate(plan["actions"]):
+        with st.expander(f"{action['tool']} · {'approval required' if action['approval_required'] else 'allow-listed'}"):
+            st.write(action["reason"])
+            st.json(action["arguments"])
+            label = "Approve & execute" if action["approval_required"] else "Execute"
+            if st.button(label, key=f"action-{case_id}-{i}"):
+                args = dict(action["arguments"])
+                if action["tool"] == "generate_underwriter_case_notes":
+                    args["notes"] = analysis.copilot_summary["case_summary"]
+                result = registry.execute(
+                    action["tool"],
+                    args,
+                    approved=action["approval_required"],
+                    actor="streamlit_underwriter",
+                )
+                if result.ok:
+                    st.success("Action executed and written to the audit trail.")
+                    st.json(result.result)
+                else:
+                    st.error(result.error)
+
+    st.subheader("Record final human decision")
+    final_decision = st.selectbox("Final decision", ["refer", "approve", "decline", "withdraw"])
+    override = st.checkbox("This overrides the workflow/model recommendation")
+    override_reason = st.text_area("Override reason", disabled=not override)
+    reviewer = st.text_input("Reviewer", value="human_reviewer")
+    if st.button("Record human decision"):
+        result = registry.execute(
+            "record_human_decision",
+            {
+                "case_id": case_id,
+                "final_decision": final_decision,
+                "override": override,
+                "override_reason": override_reason or None,
+                "reviewer": reviewer,
+            },
+            approved=True,
+            actor=reviewer,
+        )
+        if result.ok:
+            st.success("Human decision recorded in the audit trail.")
+        else:
+            st.error(result.error)
+
+    if st.button("Record current analysis snapshot in audit trail"):
+        analyse_case(
+            case_id,
+            get_store(),
+            model_service=model_service,
+            audit=get_audit(),
+            ollama_client=client,
+            use_fixture_band=use_fixture,
+        )
+        st.success("Analysis snapshot recorded.")
+
+
+elif page == "Audit Trail":
+    st.header("Audit Trail")
+    events = get_audit().events(case_id)
+    if not events:
+        st.info("No audit events have been recorded for this case yet.")
+    else:
+        audit_rows = [
+            {
+                "id": event["id"],
+                "timestamp": event["timestamp"],
+                "event_type": event["event_type"],
+                "actor": event["actor"],
+            }
+            for event in events
+        ]
+        st.dataframe(pd.DataFrame(audit_rows), hide_index=True, use_container_width=True)
+
+        st.subheader("Event details")
+        for event in reversed(events):
+            with st.expander(
+                f'#{event["id"]} ? {event["event_type"]} ? {event["actor"]}'
+            ):
+                st.json(event["payload"])
+
+        st.download_button(
+            "Download case audit JSON",
+            data=json.dumps(events, indent=2, default=str),
+            file_name=f"{case_id}_audit.json",
+            mime="application/json",
         )
 
-    with col_b:
-        # top 10 features by absolute SHAP value for this applicant
-        shap_df = pd.DataFrame({
-            "Feature":    feature_cols,
-            "SHAP Value": sv,
-        })
-        top10 = shap_df.reindex(
-            shap_df["SHAP Value"].abs().nlargest(10).index
-        )
-
-        fig_wf, ax_wf = plt.subplots(figsize=(8, 4))
-        colors = [PALETTE["reject"] if s > 0 else PALETTE["approve"]
-                  for s in top10["SHAP Value"]]
-        ax_wf.barh(top10["Feature"], top10["SHAP Value"],
-                   color=colors, alpha=0.85)
-        ax_wf.axvline(0, color="black", linewidth=0.8)
-        ax_wf.set_xlabel("SHAP value  (positive = increases default risk)")
-        ax_wf.set_title("Top 10 Feature Contributions", color=PALETTE["primary"])
-        ax_wf.spines[["top", "right"]].set_visible(False)
-        st.pyplot(fig_wf, use_container_width=True)
-        plt.close(fig_wf)
-
-
-# ── PAGE 4: Decision System ───────────────────────────────────────────────────
-
-elif page == "Decision System":
-    st.markdown("<h2 class='section-header'>Three-Tier Decision System</h2>",
-                unsafe_allow_html=True)
-    st.markdown(
-        "Borderline applications benefit from human review — a trained officer "
-        "can assess context the model can't see. The thresholds below default to "
-        "the values computed during training (based on score percentiles) but "
-        "you can adjust them to explore the approve/review/reject trade-off."
-    )
-
-    col_l, col_r = st.columns([1, 1])
-
-    lgb_proba = preds["lgb_proba"].values
-    y_true    = preds["TARGET"].values
-
-    # slider min/max derived from the actual probability range
-    prob_min = float(lgb_proba.min())
-    prob_max = float(lgb_proba.max())
-
-    with col_l:
-        approve_t = st.slider(
-            "Approve threshold — risk score below this → approve",
-            min_value=round(prob_min, 3),
-            max_value=round(prob_max, 3),
-            value=TRAINED_APPROVE_T,
-            step=0.001,
-            format="%.3f",
-        )
-        reject_t = st.slider(
-            "Reject threshold — risk score above this → reject",
-            min_value=round(prob_min, 3),
-            max_value=round(prob_max, 3),
-            value=TRAINED_REJECT_T,
-            step=0.001,
-            format="%.3f",
-        )
-        if approve_t >= reject_t:
-            st.error("Approve threshold must be lower than reject threshold.")
-            st.stop()
-
-    decisions = apply_decision_thresholds(lgb_proba, approve_t, reject_t)
-    counts    = decisions.value_counts()
-
-    approved_mask      = decisions == "approve"
-    default_in_approved = (
-        y_true[approved_mask].mean() if approved_mask.sum() > 0 else 0.0
-    )
-
-    with col_r:
-        st.subheader("Decision Breakdown")
-        ca, cr, crj = st.columns(3)
-        ca.metric("Approved",
-                  f"{counts.get('approve', 0):,}",
-                  delta=f"{counts.get('approve',0)/len(decisions)*100:.1f}%")
-        cr.metric("Manual Review",
-                  f"{counts.get('review', 0):,}",
-                  delta=f"{counts.get('review',0)/len(decisions)*100:.1f}%")
-        crj.metric("Rejected",
-                   f"{counts.get('reject', 0):,}",
-                   delta=f"{counts.get('reject',0)/len(decisions)*100:.1f}%")
-        st.metric(
-            "Default rate in approved applications",
-            f"{default_in_approved*100:.2f}%",
-            delta=f"{(default_in_approved - y_true.mean())*100:+.2f}% vs population",
-            delta_color="inverse",
-        )
-
-    st.markdown("---")
-    col_p1, col_p2 = st.columns(2)
-
-    with col_p1:
-        st.subheader("Decision Distribution")
-        dd_fig = plot_decision_distribution(decisions)
-        st.pyplot(dd_fig, use_container_width=True)
-        plt.close(dd_fig)
-
-    with col_p2:
-        st.subheader("Score Distribution with Thresholds")
-        fig_t, ax_t = plt.subplots(figsize=(6, 4))
-        ax_t.hist(lgb_proba[y_true == 0], bins=50, alpha=0.5,
-                  color=PALETTE["approve"], label="Non-default", density=True)
-        ax_t.hist(lgb_proba[y_true == 1], bins=50, alpha=0.5,
-                  color=PALETTE["reject"],  label="Default", density=True)
-        ax_t.axvline(approve_t, color=PALETTE["approve"], linewidth=2,
-                     linestyle="--", label=f"Approve ({approve_t:.3f})")
-        ax_t.axvline(reject_t,  color=PALETTE["reject"],  linewidth=2,
-                     linestyle="--", label=f"Reject ({reject_t:.3f})")
-        ax_t.set_xlabel("Predicted Default Probability")
-        ax_t.set_ylabel("Density")
-        ax_t.set_title("Score Distribution with Decision Boundaries",
-                        color=PALETTE["primary"])
-        ax_t.legend(fontsize=8)
-        ax_t.spines[["top", "right"]].set_visible(False)
-        st.pyplot(fig_t, use_container_width=True)
-        plt.close(fig_t)
-
-
-# ── PAGE 5: Fairness Analysis ─────────────────────────────────────────────────
 
 elif page == "Fairness Analysis":
-    st.markdown("<h2 class='section-header'>Fairness Analysis</h2>",
-                unsafe_allow_html=True)
-    st.markdown(
-        "Under the EU AI Act, credit scoring is classified as high-risk AI "
-        "requiring demonstrable fairness. We evaluate two standard criteria: "
-        "**demographic parity** (equal approval rates) and "
-        "**equalised odds** (equal TPR and FPR across groups)."
-    )
-
-    attribute = st.radio(
-        "Sensitive attribute", ["Gender", "Age Group"], horizontal=True
-    )
-    key = "gender" if attribute == "Gender" else "age_group"
-
-    if key not in fairness or not fairness[key]:
-        st.warning(
-            f"Fairness data for {attribute} not available. "
-            "The raw data column may not have been found during training."
-        )
+    st.header("Fairness Analysis")
+    fairness = load_json(ROOT / "models" / "fairness_results.json", {})
+    if not fairness:
+        st.warning("Fairness artefacts are missing. Run `python train.py` first.")
     else:
-        fairness_df = pd.DataFrame(fairness[key])
-        st.dataframe(
-            fairness_df.style.format({
-                "Default Rate":   "{:.3f}",
-                "Approval Rate":  "{:.3f}",
-                "TPR (Recall)":   "{:.3f}",
-                "FPR":            "{:.3f}",
-                "Avg Risk Score": "{:.3f}",
-            }),
-            use_container_width=True,
-            hide_index=True,
+        attribute = st.radio("Sensitive attribute", ["Gender", "Age Group"], horizontal=True)
+        key = "gender" if attribute == "Gender" else "age_group"
+        rows = fairness.get(key, [])
+        if not rows:
+            st.info(f"No {attribute.lower()} fairness data were produced by training.")
+        else:
+            df = pd.DataFrame(rows)
+            st.dataframe(df, hide_index=True, use_container_width=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = plot_fairness_bars(df, "Approval Rate")
+                st.pyplot(fig, use_container_width=True)
+                plt.close(fig)
+            with c2:
+                fig = plot_fairness_bars(df, "TPR (Recall)")
+                st.pyplot(fig, use_container_width=True)
+                plt.close(fig)
+            st.caption("These metrics support monitoring and investigation; they do not by themselves establish that a system is fair.")
+
+
+elif page == "Responsible AI & Evaluation":
+    st.header("Responsible AI & Evaluation")
+    st.markdown(
+        """
+- **Final credit decision stays human-controlled.** No workflow plan contains an autonomous approval/decline tool call.
+- **Retrieval before generation.** Copilot summaries receive structured application data, model context, deterministic checks and retrieved passages.
+- **Source provenance.** Retrieved passages carry filename/page metadata and generated citations are validated against supplied sources.
+- **Deterministic rules for deterministic tasks.** Income, employment, duration and missing-evidence checks are explicit and testable.
+- **Tool allow-listing and schema validation.** Arbitrary tool names, shell commands and Python execution are not supported.
+- **Sensitive actions require approval.** Evidence requests, review-case creation and final-decision recording are approval-gated.
+- **Graceful failure.** Missing ML artefacts and unavailable Ollama are surfaced rather than hidden.
+- **Synthetic documents only.** The committed demo evidence contains fictional identities and no real personal financial documents.
+"""
+    )
+    metrics_path = ROOT / "outputs" / "evaluation" / "deterministic_metrics.json"
+    if metrics_path.exists():
+        metrics = load_json(metrics_path, {})
+        st.subheader("Observed deterministic evaluation")
+        st.json(metrics["observed_deterministic_metrics"])
+        st.caption(
+            "These results are from the deliberately labelled synthetic evaluation set and should not be interpreted as real-world underwriting performance."
         )
-
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Approval Rate by Group")
-            fig_ap = plot_fairness_bars(fairness_df, metric="Approval Rate")
-            st.pyplot(fig_ap, use_container_width=True)
-            plt.close(fig_ap)
-
-        with col2:
-            st.subheader("TPR (Recall on Defaults) by Group")
-            st.markdown(
-                "Equal TPR = equalised odds. The model should catch defaults "
-                "at the same rate regardless of demographic group."
-            )
-            fig_tpr = plot_fairness_bars(fairness_df, metric="TPR (Recall)")
-            st.pyplot(fig_tpr, use_container_width=True)
-            plt.close(fig_tpr)
-
-        st.markdown("---")
-        st.subheader("Interpreting the Results")
-        st.markdown("""
-        - **Demographic parity gap** — large differences in approval rates may indicate
-          the model is indirectly using protected attributes as proxies.
-
-        - **Equalised odds gap** — if TPR differs significantly across groups, the model
-          is better at identifying defaults in some groups than others.
-
-        - **What to do if gaps are large** — options include re-weighting training data
-          by group, post-hoc threshold adjustment per group, or removing features
-          that act as proxies for protected attributes (e.g. postcode for race).
-
-        This analysis is a starting point for the kind of audit that regulators
-        and responsible AI frameworks require — not a guarantee of fairness.
-        """)
+        st.subheader("Pending local-LLM evaluation")
+        st.json(metrics["pending_ollama_metrics"])
+    else:
+        st.info("Run `python scripts/run_evaluation.py` to generate deterministic evaluation metrics.")

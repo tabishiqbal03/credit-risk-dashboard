@@ -1,0 +1,374 @@
+{
+  "description": "Fictional synthetic underwriting cases for demo and evaluation. No real PII.",
+  "cases": [
+    {
+      "case_id": "CR-001",
+      "application": {
+        "applicant_name": "Ava Murphy",
+        "declared_annual_income": 54000,
+        "employment_status": "permanent",
+        "employer": "Northstar Analytics Ltd",
+        "employment_duration_months": 36,
+        "requested_credit": 180000,
+        "annuity": 13200,
+        "age_years": 34
+      },
+      "required_evidence": [
+        "income",
+        "employment",
+        "bank"
+      ],
+      "evaluation_model_band": "approve",
+      "expected_issue_codes": [],
+      "expected_route": "standard_underwriting",
+      "retrieval_eval": [
+        {
+          "query": "What evidence supports the applicant's annual income?",
+          "expected_source": "income_confirmation.pdf"
+        },
+        {
+          "query": "How long has Ava Murphy worked for Northstar Analytics?",
+          "expected_source": "employment_confirmation.txt"
+        }
+      ],
+      "document_manifest": [
+        {
+          "filename": "employment_confirmation.txt",
+          "expected_facts": {
+            "employment_status": "permanent",
+            "employment_duration_months": 36,
+            "employer": "Northstar Analytics Ltd"
+          }
+        },
+        {
+          "filename": "income_confirmation.pdf",
+          "expected_facts": {
+            "verified_annual_income": 54000.0
+          }
+        },
+        {
+          "filename": "bank_statement_summary.docx",
+          "expected_facts": {
+            "monthly_salary_credit": 4500.0,
+            "annualised_salary_credit": 54000.0
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "CR-002",
+      "application": {
+        "applicant_name": "Liam Byrne",
+        "declared_annual_income": 46000,
+        "employment_status": "permanent",
+        "employer": "Harbour Tech Services",
+        "employment_duration_months": 22,
+        "requested_credit": 145000,
+        "annuity": 10800,
+        "age_years": 29
+      },
+      "required_evidence": [
+        "income",
+        "employment"
+      ],
+      "evaluation_model_band": "review",
+      "expected_issue_codes": [
+        "MISSING_INCOME_EVIDENCE"
+      ],
+      "expected_route": "evidence_required",
+      "retrieval_eval": [
+        {
+          "query": "What employment evidence is available for Liam Byrne?",
+          "expected_source": "employment_confirmation.docx"
+        }
+      ],
+      "document_manifest": [
+        {
+          "filename": "employment_confirmation.docx",
+          "expected_facts": {
+            "employment_status": "permanent",
+            "employment_duration_months": 22,
+            "employer": "Harbour Tech Services"
+          }
+        },
+        {
+          "filename": "applicant_note.txt",
+          "expected_facts": {}
+        }
+      ]
+    },
+    {
+      "case_id": "CR-003",
+      "application": {
+        "applicant_name": "Sofia Khan",
+        "declared_annual_income": 72000,
+        "employment_status": "permanent",
+        "employer": "Greenline Pharma",
+        "employment_duration_months": 48,
+        "requested_credit": 220000,
+        "annuity": 15600,
+        "age_years": 38
+      },
+      "required_evidence": [
+        "income",
+        "employment",
+        "bank"
+      ],
+      "evaluation_model_band": "review",
+      "expected_issue_codes": [
+        "INCOME_MISMATCH"
+      ],
+      "expected_route": "manual_review",
+      "retrieval_eval": [
+        {
+          "query": "What verified income is shown for Sofia Khan?",
+          "expected_source": "income_confirmation.pdf"
+        }
+      ],
+      "document_manifest": [
+        {
+          "filename": "employment_confirmation.txt",
+          "expected_facts": {
+            "employment_status": "permanent",
+            "employment_duration_months": 48
+          }
+        },
+        {
+          "filename": "income_confirmation.pdf",
+          "expected_facts": {
+            "verified_annual_income": 60000.0
+          }
+        },
+        {
+          "filename": "bank_statement_summary.docx",
+          "expected_facts": {
+            "monthly_salary_credit": 5000.0,
+            "annualised_salary_credit": 60000.0
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "CR-004",
+      "application": {
+        "applicant_name": "Noah Silva",
+        "declared_annual_income": 48000,
+        "employment_status": "permanent",
+        "employer": "Orion Logistics",
+        "employment_duration_months": 18,
+        "requested_credit": 130000,
+        "annuity": 9600,
+        "age_years": 31
+      },
+      "required_evidence": [
+        "income",
+        "employment"
+      ],
+      "evaluation_model_band": "approve",
+      "expected_issue_codes": [
+        "EMPLOYMENT_STATUS_MISMATCH"
+      ],
+      "expected_route": "manual_review",
+      "retrieval_eval": [
+        {
+          "query": "What employment status is confirmed for Noah Silva?",
+          "expected_source": "employment_confirmation.pdf"
+        }
+      ],
+      "document_manifest": [
+        {
+          "filename": "employment_confirmation.pdf",
+          "expected_facts": {
+            "employment_status": "contract",
+            "employment_duration_months": 18
+          }
+        },
+        {
+          "filename": "income_confirmation.txt",
+          "expected_facts": {
+            "verified_annual_income": 48000.0
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "CR-005",
+      "application": {
+        "applicant_name": "Mia O'Connor",
+        "declared_annual_income": 51000,
+        "employment_status": "permanent",
+        "employer": "Cedar Health Systems",
+        "employment_duration_months": 30,
+        "requested_credit": 155000,
+        "annuity": 11200,
+        "age_years": 33
+      },
+      "required_evidence": [
+        "income",
+        "employment"
+      ],
+      "evaluation_model_band": "review",
+      "expected_issue_codes": [
+        "EMPLOYMENT_DURATION_MISMATCH"
+      ],
+      "expected_route": "manual_review",
+      "retrieval_eval": [
+        {
+          "query": "How many months of employment are documented for Mia O'Connor?",
+          "expected_source": "employment_confirmation.docx"
+        }
+      ],
+      "document_manifest": [
+        {
+          "filename": "employment_confirmation.docx",
+          "expected_facts": {
+            "employment_status": "permanent",
+            "employment_duration_months": 8
+          }
+        },
+        {
+          "filename": "income_confirmation.pdf",
+          "expected_facts": {
+            "verified_annual_income": 51000.0
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "CR-006",
+      "application": {
+        "applicant_name": "Ethan Walsh",
+        "declared_annual_income": 66000,
+        "employment_status": "permanent",
+        "employer": "Atlas Energy Consulting",
+        "employment_duration_months": 41,
+        "requested_credit": 200000,
+        "annuity": 14400,
+        "age_years": 40
+      },
+      "required_evidence": [
+        "income",
+        "employment",
+        "bank"
+      ],
+      "evaluation_model_band": "review",
+      "expected_issue_codes": [
+        "INCOME_MISMATCH",
+        "CONFLICTING_INCOME_EVIDENCE"
+      ],
+      "expected_route": "manual_review",
+      "retrieval_eval": [
+        {
+          "query": "What salary credit appears in Ethan Walsh's bank evidence?",
+          "expected_source": "bank_statement_summary.pdf"
+        }
+      ],
+      "document_manifest": [
+        {
+          "filename": "employment_confirmation.txt",
+          "expected_facts": {
+            "employment_status": "permanent",
+            "employment_duration_months": 41
+          }
+        },
+        {
+          "filename": "income_confirmation.docx",
+          "expected_facts": {
+            "verified_annual_income": 66000.0
+          }
+        },
+        {
+          "filename": "bank_statement_summary.pdf",
+          "expected_facts": {
+            "monthly_salary_credit": 4800.0,
+            "annualised_salary_credit": 57600.0
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "CR-007",
+      "application": {
+        "applicant_name": "Zara Patel",
+        "declared_annual_income": 39000,
+        "employment_status": "contract",
+        "employer": "Bluebridge Media",
+        "employment_duration_months": 11,
+        "requested_credit": 118000,
+        "annuity": 9000,
+        "age_years": 27
+      },
+      "required_evidence": [
+        "income",
+        "employment"
+      ],
+      "evaluation_model_band": "approve",
+      "expected_issue_codes": [
+        "MISSING_INCOME_EVIDENCE",
+        "MISSING_EMPLOYMENT_EVIDENCE"
+      ],
+      "expected_route": "evidence_required",
+      "retrieval_eval": [
+        {
+          "query": "Which documents are still outstanding for Zara Patel?",
+          "expected_source": "applicant_note.txt"
+        }
+      ],
+      "document_manifest": [
+        {
+          "filename": "applicant_note.txt",
+          "expected_facts": {}
+        }
+      ]
+    },
+    {
+      "case_id": "CR-008",
+      "application": {
+        "applicant_name": "Daniel Chen",
+        "declared_annual_income": 83000,
+        "employment_status": "permanent",
+        "employer": "Summit Engineering Ireland",
+        "employment_duration_months": 67,
+        "requested_credit": 280000,
+        "annuity": 19200,
+        "age_years": 45
+      },
+      "required_evidence": [
+        "income",
+        "employment",
+        "bank"
+      ],
+      "evaluation_model_band": "reject",
+      "expected_issue_codes": [],
+      "expected_route": "human_credit_review",
+      "retrieval_eval": [
+        {
+          "query": "What income evidence exists for Daniel Chen?",
+          "expected_source": "income_confirmation.docx"
+        }
+      ],
+      "document_manifest": [
+        {
+          "filename": "employment_confirmation.pdf",
+          "expected_facts": {
+            "employment_status": "permanent",
+            "employment_duration_months": 67
+          }
+        },
+        {
+          "filename": "income_confirmation.docx",
+          "expected_facts": {
+            "verified_annual_income": 83000.0
+          }
+        },
+        {
+          "filename": "bank_statement_summary.txt",
+          "expected_facts": {
+            "monthly_salary_credit": 6916.67,
+            "annualised_salary_credit": 83000.04
+          }
+        }
+      ]
+    }
+  ]
+}
